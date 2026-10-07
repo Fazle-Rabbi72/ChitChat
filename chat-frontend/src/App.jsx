@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import API from "./api";
+import API, { getApiBaseUrl, getWsBaseUrl } from "./api";
 import {
   Phone,
   PhoneOff,
@@ -52,7 +52,9 @@ const getFileUrl = (url) => {
   ) {
     return url;
   }
-  const baseUrl = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
+  const baseUrl = typeof getApiBaseUrl === "function"
+    ? getApiBaseUrl()
+    : (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
   return `${baseUrl}${url.startsWith("/") ? "" : "/"}${url}`;
 };
 
@@ -70,6 +72,38 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(false);
+
+  // Dynamic Backend Server URL config
+  const [showServerConfig, setShowServerConfig] = useState(false);
+  const [currentServerUrl, setCurrentServerUrl] = useState(
+    typeof getApiBaseUrl === "function" ? getApiBaseUrl() : "http://localhost:8000"
+  );
+  const [customServerInput, setCustomServerInput] = useState(
+    typeof getApiBaseUrl === "function" ? getApiBaseUrl() : "http://localhost:8000"
+  );
+
+  const handleSaveServerUrl = () => {
+    if (!customServerInput.trim()) {
+      localStorage.removeItem("custom_api_url");
+    } else {
+      let cleanUrl = customServerInput.trim().replace(/\/$/, "");
+      if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+        cleanUrl = "https://" + cleanUrl;
+      }
+      localStorage.setItem("custom_api_url", cleanUrl);
+    }
+    const updated = typeof getApiBaseUrl === "function" ? getApiBaseUrl() : "http://localhost:8000";
+    setCurrentServerUrl(updated);
+    setCustomServerInput(updated);
+    setShowServerConfig(false);
+    setAuthError("");
+    if (ws.current) {
+      try {
+        ws.current.close();
+      } catch (e) {}
+      ws.current = null;
+    }
+  };
 
   // App Data states & Loading states (for Skeletons)
   const [friends, setFriends] = useState([]);
@@ -191,6 +225,33 @@ export default function App() {
       });
   }, [token]);
 
+  // Load Contacts, Groups & Presence (Resilient Promise.allSettled)
+  const loadInitialData = async () => {
+    if (!token) return;
+    try {
+      const [friendsRes, groupsRes, pendingRes, onlineRes] = await Promise.allSettled([
+        API.get(`/api/friends?token=${token}`),
+        API.get(`/api/groups?token=${token}`),
+        API.get(`/api/friend-requests/pending?token=${token}`),
+        API.get(`/api/users/online`),
+      ]);
+      if (friendsRes.status === "fulfilled") setFriends(friendsRes.value.data || []);
+      if (groupsRes.status === "fulfilled") setGroups(groupsRes.value.data || []);
+      if (pendingRes.status === "fulfilled") setPendingRequests(pendingRes.value.data || []);
+      if (onlineRes.status === "fulfilled" && onlineRes.value?.data?.online_user_ids) {
+        setOnlineUserIds(new Set((onlineRes.value.data.online_user_ids || []).map(Number)));
+      }
+    } catch (err) {
+      console.warn("Initial data load deferred:", err);
+    } finally {
+      setLoadingContacts(false);
+    }
+  };
+
+  useEffect(() => {
+    loadInitialData();
+  }, [token]);
+
   // WebSocket Setup with Auto-Reconnect and Visibility/Foreground Detection
   useEffect(() => {
     if (!token) return;
@@ -202,12 +263,25 @@ export default function App() {
       }
 
       try {
-        const wsUrl = `${getWsBaseUrl()}?token=${token}`;
+        const resolveWsUrl = (tok) => {
+          try {
+            if (typeof getWsBaseUrl === "function") return `${getWsBaseUrl()}?token=${tok}`;
+          } catch (e) {
+            console.warn("getWsBaseUrl fallback", e);
+          }
+          const base = (typeof getApiBaseUrl === "function" ? getApiBaseUrl() : (import.meta.env.VITE_API_URL || "http://localhost:8000")).replace(/\/$/, "");
+          const isHttps = base.startsWith("https");
+          const clean = base.replace(/^https?:\/\//, "").replace(/\/$/, "");
+          return `${isHttps ? "wss" : "ws"}://${clean}/ws?token=${tok}`;
+        };
+
+        const wsUrl = resolveWsUrl(token);
         const socket = new WebSocket(wsUrl);
         ws.current = socket;
 
         socket.onopen = () => {
           console.log("WebSocket connected successfully!");
+          loadInitialData();
         };
 
         socket.onerror = (e) => {
@@ -234,15 +308,16 @@ export default function App() {
 
         // Realtime Online Presence
         if (data.type === "presence-initial") {
-          setOnlineUserIds(new Set(data.online_user_ids || []));
+          setOnlineUserIds(new Set((data.online_user_ids || []).map(Number)));
           return;
         }
 
         if (data.type === "presence-change") {
           setOnlineUserIds((prev) => {
             const next = new Set(prev);
-            if (data.status === "online") next.add(data.user_id);
-            else next.delete(data.user_id);
+            const uid = Number(data.user_id);
+            if (data.status === "online") next.add(uid);
+            else next.delete(uid);
             return next;
           });
           return;
@@ -409,6 +484,8 @@ export default function App() {
         if (!ws.current || ws.current.readyState === WebSocket.CLOSED || ws.current.readyState === WebSocket.CLOSING) {
           console.log("Tab foregrounded / focused: Reconnecting WebSocket...");
           connectWebSocket();
+        } else if (ws.current.readyState === WebSocket.OPEN) {
+          loadInitialData();
         }
       }
     };
@@ -442,33 +519,6 @@ export default function App() {
       }
     }
   }, [callState, callType]);
-
-  // Load Contacts, Groups & Presence (Resilient Promise.allSettled)
-  const loadInitialData = async () => {
-    if (!token) return;
-    try {
-      const [friendsRes, groupsRes, pendingRes, onlineRes] = await Promise.allSettled([
-        API.get(`/api/friends?token=${token}`),
-        API.get(`/api/groups?token=${token}`),
-        API.get(`/api/friend-requests/pending?token=${token}`),
-        API.get(`/api/users/online`),
-      ]);
-      if (friendsRes.status === "fulfilled") setFriends(friendsRes.value.data || []);
-      if (groupsRes.status === "fulfilled") setGroups(groupsRes.value.data || []);
-      if (pendingRes.status === "fulfilled") setPendingRequests(pendingRes.value.data || []);
-      if (onlineRes.status === "fulfilled" && onlineRes.value?.data?.online_user_ids) {
-        setOnlineUserIds(new Set(onlineRes.value.data.online_user_ids));
-      }
-    } catch (err) {
-      console.warn("Initial data load deferred:", err);
-    } finally {
-      setLoadingContacts(false);
-    }
-  };
-
-  useEffect(() => {
-    loadInitialData();
-  }, [token]);
 
   // Fetch Chat History when Active Chat changes
   useEffect(() => {
@@ -867,7 +917,7 @@ export default function App() {
 
       const tempId = "temp_" + Date.now();
       const isTargetOnline =
-        activeChat.type === "direct" && onlineUserIds.has(activeChat.id);
+        activeChat.type === "direct" && onlineUserIds.has(Number(activeChat.id));
 
       // Optimistic Message in UI (<0.2ms perceived latency)
       const optimisticMsg = {
@@ -923,7 +973,7 @@ export default function App() {
 
     const tempId = "temp_" + Date.now();
     const isTargetOnline =
-      activeChat.type === "direct" && onlineUserIds.has(activeChat.id);
+      activeChat.type === "direct" && onlineUserIds.has(Number(activeChat.id));
 
     // Optimistic UI: Immediately render in DOM (<0.2ms)
     const optimisticMsg = {
@@ -1246,6 +1296,70 @@ export default function App() {
               )}
             </button>
           </form>
+
+          {/* Backend Server Connection Switcher (For Mobile & Custom Cloud Backends) */}
+          <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.08)", textAlign: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+              <span style={{ fontSize: 12, color: "#94a3b8" }}>
+                Server: <strong style={{ color: currentServerUrl.includes("localhost") ? "#f59e0b" : "#10b981" }}>{currentServerUrl}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowServerConfig(!showServerConfig)}
+                style={{
+                  background: "rgba(255,255,255,0.08)",
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "3px 8px",
+                  color: "#38bdf8",
+                  fontSize: 11,
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                {showServerConfig ? "Close" : "Change URL"}
+              </button>
+            </div>
+
+            {showServerConfig && (
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8, textAlign: "left" }}>
+                <p style={{ fontSize: 11, color: "#94a3b8", margin: 0 }}>
+                  Enter live backend URL (e.g. Render, Railway, or local IP):
+                </p>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <input
+                    type="text"
+                    value={customServerInput}
+                    onChange={(e) => setCustomServerInput(e.target.value)}
+                    placeholder="https://your-backend.onrender.com"
+                    style={{
+                      ...styles.textInput,
+                      padding: "8px 10px",
+                      fontSize: 12,
+                      flex: 1,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveServerUrl}
+                    style={{
+                      background: "#6366f1",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: 8,
+                      padding: "8px 14px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -1423,7 +1537,7 @@ export default function App() {
             filteredFriends.map((f) => {
               const isActive =
                 activeChat?.type === "direct" && activeChat.id === f.id;
-              const isOnline = onlineUserIds.has(f.id);
+              const isOnline = onlineUserIds.has(Number(f.id));
               return (
                 <div
                   key={`friend-${f.id}`}
@@ -1596,7 +1710,7 @@ export default function App() {
                   <div style={styles.chatHeaderSub}>
                     {activeChat.type === "direct" ? (
                       (() => {
-                        const isChatOnline = onlineUserIds.has(activeChat.id);
+                        const isChatOnline = onlineUserIds.has(Number(activeChat.id));
                         return (
                           <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
                             <span

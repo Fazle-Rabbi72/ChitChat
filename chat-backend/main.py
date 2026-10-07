@@ -2,8 +2,7 @@ import os
 import json
 import uuid
 import base64
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -115,18 +114,27 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[int, List[WebSocket]] = {}
 
-    def is_online(self, user_id: int) -> bool:
-        return user_id in self.active_connections and len(self.active_connections[user_id]) > 0
+    def is_online(self, user_id: Any) -> bool:
+        try:
+            uid = int(user_id)
+        except (ValueError, TypeError):
+            uid = user_id
+        return uid in self.active_connections and len(self.active_connections[uid]) > 0
 
     def get_online_users(self) -> List[int]:
         return list(self.active_connections.keys())
 
-    async def connect(self, user_id: int, websocket: WebSocket):
+    async def connect(self, user_id: Any, websocket: WebSocket):
         await websocket.accept()
-        is_first = user_id not in self.active_connections or len(self.active_connections[user_id]) == 0
-        if user_id not in self.active_connections:
-            self.active_connections[user_id] = []
-        self.active_connections[user_id].append(websocket)
+        try:
+            uid = int(user_id)
+        except (ValueError, TypeError):
+            uid = user_id
+
+        is_first = uid not in self.active_connections or len(self.active_connections[uid]) == 0
+        if uid not in self.active_connections:
+            self.active_connections[uid] = []
+        self.active_connections[uid].append(websocket)
 
         # 1. Send current list of online users to the newly connected user
         try:
@@ -141,26 +149,36 @@ class ConnectionManager:
         if is_first:
             await self.broadcast_all({
                 "type": "presence-change",
-                "user_id": user_id,
+                "user_id": uid,
                 "status": "online"
             })
 
-    async def disconnect(self, user_id: int, websocket: WebSocket):
-        if user_id in self.active_connections:
-            if websocket in self.active_connections[user_id]:
-                self.active_connections[user_id].remove(websocket)
-            if not self.active_connections[user_id]:
-                del self.active_connections[user_id]
+    async def disconnect(self, user_id: Any, websocket: WebSocket):
+        try:
+            uid = int(user_id)
+        except (ValueError, TypeError):
+            uid = user_id
+
+        if uid in self.active_connections:
+            if websocket in self.active_connections[uid]:
+                self.active_connections[uid].remove(websocket)
+            if not self.active_connections[uid]:
+                del self.active_connections[uid]
                 # Broadcast offline status to everyone
                 await self.broadcast_all({
                     "type": "presence-change",
-                    "user_id": user_id,
+                    "user_id": uid,
                     "status": "offline"
                 })
 
-    async def send_to_user(self, user_id: int, data: dict):
-        if user_id in self.active_connections:
-            for conn in list(self.active_connections[user_id]):
+    async def send_to_user(self, user_id: Any, data: dict):
+        try:
+            uid = int(user_id)
+        except (ValueError, TypeError):
+            uid = user_id
+
+        if uid in self.active_connections:
+            for conn in list(self.active_connections[uid]):
                 try:
                     await conn.send_text(json.dumps(data))
                 except Exception:
@@ -473,6 +491,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
 
             msg_type = data.get("type")
             target_id = data.get("target_id")
+            if target_id is not None:
+                try:
+                    target_id = int(target_id)
+                except (ValueError, TypeError):
+                    pass
 
             # === WebRTC Audio & Video Call Signaling ===
             if msg_type == "call-request":
@@ -484,7 +507,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
                     "caller_name": user.username,
                     "caller_avatar": user.profile_image
                 }
-                target_conns = manager.active_connections.get(target_id, set())
+                target_conns = manager.active_connections.get(target_id, [])
                 if not target_conns or len(target_conns) == 0:
                     await websocket.send_text(json.dumps({
                         "type": "call-rejected",
