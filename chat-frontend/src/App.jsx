@@ -109,12 +109,20 @@ export default function App() {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoDisabled, setIsVideoDisabled] = useState(false);
 
-  // Responsive state
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  // Responsive state (Robust detection for mobile devices & tablets up to 860px)
+  const checkIsMobile = () => {
+    if (typeof window === "undefined") return false;
+    return (
+      window.innerWidth <= 860 ||
+      window.matchMedia("(max-width: 860px)").matches
+    );
+  };
+  const [isMobile, setIsMobile] = useState(checkIsMobile());
 
   // Refs
   const ws = useRef(null);
   const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
   const fileInputRef = useRef(null);
   const pc = useRef(null);
   const localStream = useRef(null);
@@ -131,11 +139,15 @@ export default function App() {
     activeChatRef.current = activeChat;
   }, [activeChat]);
 
-  // Handle window resize
+  // Handle window resize & orientation change
   useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth < 768);
+    const handleResize = () => setIsMobile(checkIsMobile());
     window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
+    window.addEventListener("orientationchange", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("orientationchange", handleResize);
+    };
   }, []);
 
   // Keyboard shortcut to close chat or modals on Escape
@@ -421,10 +433,17 @@ export default function App() {
     fetchChatHistory();
   }, [activeChat, token]);
 
-  // Auto-scroll messages
+  // Auto-scroll messages container safely without moving the browser window
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    if (messagesContainerRef.current) {
+      messagesContainerRef.current.scrollTop = messagesContainerRef.current.scrollHeight;
+    }
+  }, [messages, loadingMessages, activeChat]);
+
+  // Ensure browser window itself never remains scrolled on mobile
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [activeChat]);
 
   // Helper to send WS signals
   const sendWsSignal = (payload) => {
@@ -1161,7 +1180,10 @@ export default function App() {
 
   // Main Dashboard
   return (
-    <div style={styles.mainLayout}>
+    <div
+      className={isMobile ? (activeChat ? "app-root has-active-chat" : "app-root has-no-chat") : "app-root"}
+      style={styles.mainLayout}
+    >
       {/* 
         CRITICAL: Persistent Remote Audio Element 
         This is always mounted in the DOM to ensure you CAN ALWAYS HEAR THE REMOTE USER'S VOICE!
@@ -1176,10 +1198,20 @@ export default function App() {
 
       {/* ---------------- SIDEBAR ---------------- */}
       <div
+        className={
+          isMobile && activeChat
+            ? "app-sidebar app-sidebar-mobile-hidden"
+            : isMobile
+            ? "app-sidebar app-sidebar-mobile-full"
+            : "app-sidebar"
+        }
         style={{
           ...styles.sidebar,
           display: isMobile && activeChat ? "none" : "flex",
           width: isMobile ? "100%" : "360px",
+          minWidth: isMobile ? "100%" : "340px",
+          maxWidth: isMobile ? "100%" : "380px",
+          flexShrink: isMobile ? 1 : 0,
         }}
       >
         {/* User Profile Bar */}
@@ -1439,6 +1471,13 @@ export default function App() {
 
       {/* ---------------- CHAT WINDOW AREA ---------------- */}
       <div
+        className={
+          isMobile && !activeChat
+            ? "app-chat-window app-chat-mobile-hidden"
+            : isMobile
+            ? "app-chat-window app-chat-mobile-full"
+            : "app-chat-window"
+        }
         style={{
           ...styles.chatWindow,
           display: isMobile && !activeChat ? "none" : "flex",
@@ -1449,7 +1488,7 @@ export default function App() {
           <>
             {/* Chat Top Header */}
             <div style={styles.chatHeader}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0, flex: 1 }}>
                 {/* Mobile Back Button */}
                 {isMobile && (
                   <button
@@ -1546,7 +1585,7 @@ export default function App() {
             </div>
 
             {/* Messages Scroll Box with Skeleton Support */}
-            <div style={styles.messagesContainer}>
+            <div ref={messagesContainerRef} style={styles.messagesContainer}>
               {loadingMessages ? (
                 <div style={styles.skeletonChatContainer}>
                   <div style={{ alignSelf: "flex-start", width: "45%", height: 50, borderRadius: 16 }} className="skeleton-box" />
@@ -2269,10 +2308,13 @@ const styles = {
   // Main Dashboard
   mainLayout: {
     display: "flex",
-    height: "100vh",
-    width: "100vw",
+    height: "100%",
+    maxHeight: "100%",
+    width: "100%",
+    maxWidth: "100vw",
     background: "#090d16",
     overflow: "hidden",
+    position: "relative",
   },
 
   // Sidebar
@@ -2282,6 +2324,9 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     height: "100%",
+    maxHeight: "100%",
+    overflow: "hidden",
+    position: "relative",
   },
   sidebarHeader: {
     padding: "16px 18px",
@@ -2289,6 +2334,11 @@ const styles = {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
+    flexShrink: 0,
+    position: "sticky",
+    top: 0,
+    zIndex: 40,
+    background: "#101524",
   },
   userProfileInfo: { display: "flex", alignItems: "center", gap: 12 },
   avatarWrapper: { position: "relative" },
@@ -2441,7 +2491,15 @@ const styles = {
     cursor: "pointer",
   },
 
-  listContainer: { flex: 1, overflowY: "auto", padding: "12px 14px" },
+  listContainer: {
+    flex: 1,
+    overflowY: "auto",
+    overflowX: "hidden",
+    padding: "12px 14px",
+    minHeight: 0,
+    WebkitOverflowScrolling: "touch",
+    overscrollBehavior: "contain",
+  },
   listSectionHeader: { marginBottom: 8 },
   emptyListText: { fontSize: 12, color: "#64748b", padding: "6px 0" },
   chatListItem: {
@@ -2520,15 +2578,25 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     height: "100%",
+    maxHeight: "100%",
     background: "#0a0e19",
+    overflow: "hidden",
+    position: "relative",
+    minWidth: 0,
   },
   chatHeader: {
-    padding: "14px 20px",
+    padding: "12px 16px",
     background: "#101524",
     borderBottom: "1px solid rgba(255, 255, 255, 0.07)",
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
+    flexShrink: 0,
+    position: "sticky",
+    top: 0,
+    zIndex: 50,
+    width: "100%",
+    boxSizing: "border-box",
   },
   backBtn: {
     background: "rgba(255,255,255,0.06)",
@@ -2572,11 +2640,15 @@ const styles = {
 
   messagesContainer: {
     flex: 1,
-    padding: "18px 22px",
+    padding: "16px 18px",
     overflowY: "auto",
+    overflowX: "hidden",
     display: "flex",
     flexDirection: "column",
     gap: 12,
+    minHeight: 0,
+    WebkitOverflowScrolling: "touch",
+    overscrollBehavior: "contain",
   },
   messageRow: { display: "flex", alignItems: "flex-end", gap: 8 },
   msgAvatarWrapper: { flexShrink: 0 },
@@ -2689,10 +2761,15 @@ const styles = {
   inputArea: {
     display: "flex",
     alignItems: "center",
-    padding: "12px 18px",
+    padding: "12px 16px",
     background: "#101524",
     borderTop: "1px solid rgba(255, 255, 255, 0.07)",
     gap: 8,
+    flexShrink: 0,
+    position: "relative",
+    zIndex: 20,
+    width: "100%",
+    boxSizing: "border-box",
   },
   attachBtn: {
     background: "rgba(255, 255, 255, 0.05)",
