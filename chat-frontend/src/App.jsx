@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import API from "./api";
+import API, { getApiBaseUrl, getWsBaseUrl } from "./api";
 import {
   Phone,
   PhoneOff,
@@ -52,7 +52,7 @@ const getFileUrl = (url) => {
   ) {
     return url;
   }
-  const baseUrl = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
+  const baseUrl = getApiBaseUrl();
   return `${baseUrl}${url.startsWith("/") ? "" : "/"}${url}`;
 };
 
@@ -70,6 +70,28 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(false);
+
+  // Dynamic Backend Server URL config
+  const [showServerConfig, setShowServerConfig] = useState(false);
+  const [currentServerUrl, setCurrentServerUrl] = useState(getApiBaseUrl());
+  const [customServerInput, setCustomServerInput] = useState(getApiBaseUrl());
+
+  const handleSaveServerUrl = () => {
+    if (!customServerInput.trim()) {
+      localStorage.removeItem("custom_api_url");
+    } else {
+      let cleanUrl = customServerInput.trim().replace(/\/$/, "");
+      if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+        cleanUrl = "https://" + cleanUrl;
+      }
+      localStorage.setItem("custom_api_url", cleanUrl);
+    }
+    const updated = getApiBaseUrl();
+    setCurrentServerUrl(updated);
+    setCustomServerInput(updated);
+    setShowServerConfig(false);
+    setAuthError("");
+  };
 
   // App Data states & Loading states (for Skeletons)
   const [friends, setFriends] = useState([]);
@@ -184,7 +206,7 @@ export default function App() {
   useEffect(() => {
     if (!token) return;
 
-    const wsUrl = `${import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws"}?token=${token}`;
+    const wsUrl = `${getWsBaseUrl()}?token=${token}`;
     try {
       ws.current = new WebSocket(wsUrl);
     } catch (err) {
@@ -1182,6 +1204,70 @@ export default function App() {
               )}
             </button>
           </form>
+
+          {/* Backend Server Connection Info & Configuration */}
+          <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.08)", textAlign: "center" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+              <span style={{ fontSize: 12, color: "#94a3b8" }}>
+                Server: <strong style={{ color: currentServerUrl.includes("localhost") ? "#f59e0b" : "#10b981" }}>{currentServerUrl}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowServerConfig(!showServerConfig)}
+                style={{
+                  background: "rgba(255,255,255,0.08)",
+                  border: "none",
+                  borderRadius: 6,
+                  padding: "3px 8px",
+                  color: "#38bdf8",
+                  fontSize: 11,
+                  cursor: "pointer",
+                  fontWeight: 600,
+                }}
+              >
+                {showServerConfig ? "Close" : "Change URL"}
+              </button>
+            </div>
+
+            {showServerConfig && (
+              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8, textAlign: "left" }}>
+                <p style={{ fontSize: 11, color: "#94a3b8", margin: 0 }}>
+                  Enter your live backend URL (e.g. from Render.com):
+                </p>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <input
+                    type="text"
+                    value={customServerInput}
+                    onChange={(e) => setCustomServerInput(e.target.value)}
+                    placeholder="https://your-backend.onrender.com"
+                    style={{
+                      ...styles.textInput,
+                      padding: "8px 10px",
+                      fontSize: 12,
+                      flex: 1,
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveServerUrl}
+                    style={{
+                      background: "#6366f1",
+                      color: "#fff",
+                      border: "none",
+                      borderRadius: 8,
+                      padding: "8px 14px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
