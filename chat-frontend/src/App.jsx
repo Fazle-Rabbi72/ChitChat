@@ -23,15 +23,24 @@ import {
   Check,
   CheckCheck,
   Trash2,
-  Ban
+  Ban,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 
-// WebRTC STUN Server Config
+// WebRTC STUN Server Config (High-availability worldwide STUN servers)
 const RTC_CONFIG = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+    { urls: "stun:stun3.l.google.com:19302" },
+    { urls: "stun:stun4.l.google.com:19302" },
+    { urls: "stun:stun.cloudflare.com:3478" },
+    { urls: "stun:global.stun.twilio.com:3478" },
+    { urls: "stun:stun.services.mozilla.com" },
   ],
+  iceCandidatePoolSize: 10,
 };
 
 // Popular Emojis
@@ -171,6 +180,9 @@ export default function App() {
   const callTypeRef = useRef(callType);
   const callerInfoRef = useRef(callerInfo);
   const reconnectTimeoutRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const audioSourceNodeRef = useRef(null);
+  const [isAudioBlocked, setIsAudioBlocked] = useState(false);
 
   useEffect(() => {
     activeChatRef.current = activeChat;
@@ -506,15 +518,90 @@ export default function App() {
     };
   }, [token]);
 
+  // Dedicated Web Audio & HTML Audio Player (Dual-pipeline for guaranteed audible sound)
+  const playRemoteAudio = async (stream) => {
+    if (!stream) return;
+
+    // 1. Ensure all remote audio tracks are active
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = true;
+    });
+
+    // 2. HTML Audio element playback
+    if (remoteAudioRef.current) {
+      if (remoteAudioRef.current.srcObject !== stream) {
+        remoteAudioRef.current.srcObject = stream;
+      }
+      remoteAudioRef.current.volume = 1.0;
+      remoteAudioRef.current.muted = false;
+      try {
+        await remoteAudioRef.current.play();
+        setIsAudioBlocked(false);
+      } catch (err) {
+        console.warn("HTML Audio autoplay policy blocked play:", err);
+        setIsAudioBlocked(true);
+      }
+    }
+
+    // 3. Web Audio API Direct Pipeline (Direct OS sound hardware output)
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (AudioCtx) {
+        if (!audioContextRef.current || audioContextRef.current.state === "closed") {
+          audioContextRef.current = new AudioCtx();
+        }
+        if (audioContextRef.current.state === "suspended") {
+          await audioContextRef.current.resume();
+        }
+
+        const audioTracks = stream.getAudioTracks();
+        if (audioTracks.length > 0) {
+          const audioOnlyStream = new MediaStream([audioTracks[0]]);
+          if (audioSourceNodeRef.current) {
+            try { audioSourceNodeRef.current.disconnect(); } catch (e) {}
+          }
+          const source = audioContextRef.current.createMediaStreamSource(audioOnlyStream);
+          const gainNode = audioContextRef.current.createGain();
+          gainNode.gain.value = 1.0;
+          source.connect(gainNode);
+          gainNode.connect(audioContextRef.current.destination);
+          audioSourceNodeRef.current = source;
+          setIsAudioBlocked(false);
+          console.log("Remote audio pipeline connected via Web Audio API destination!");
+        }
+      }
+    } catch (e) {
+      console.warn("Web Audio API stream attachment fallback:", e);
+    }
+  };
+
+  const unlockAudioOutput = async () => {
+    setIsAudioBlocked(false);
+    try {
+      if (audioContextRef.current && audioContextRef.current.state === "suspended") {
+        await audioContextRef.current.resume();
+      }
+      if (remoteAudioRef.current) {
+        remoteAudioRef.current.volume = 1.0;
+        remoteAudioRef.current.muted = false;
+        await remoteAudioRef.current.play();
+      }
+      if (remoteStream.current) {
+        playRemoteAudio(remoteStream.current);
+      }
+    } catch (e) {
+      console.warn("Audio unlock attempted:", e);
+    }
+  };
+
   // Attach remote stream to audio/video elements when call connects
   useEffect(() => {
     if (callState === "connected" && remoteStream.current) {
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.srcObject = remoteStream.current;
-        remoteAudioRef.current.play().catch((e) => console.log("Audio play error:", e));
-      }
+      playRemoteAudio(remoteStream.current);
       if (remoteVideoRef.current && callType === "video") {
-        remoteVideoRef.current.srcObject = remoteStream.current;
+        if (remoteVideoRef.current.srcObject !== remoteStream.current) {
+          remoteVideoRef.current.srcObject = remoteStream.current;
+        }
         remoteVideoRef.current.play().catch((e) => console.log("Video play error:", e));
       }
     }
@@ -593,24 +680,51 @@ export default function App() {
     };
 
     peer.ontrack = (event) => {
-      console.log("WebRTC received remote track:", event.track.kind);
-      const stream = event.streams[0] || new MediaStream([event.track]);
-      remoteStream.current = stream;
+      console.log("WebRTC received remote track:", event.track.kind, event.track.id);
+      event.track.enabled = true;
 
-      // Always send audio to remoteAudioRef so user can HEAR!
-      if (remoteAudioRef.current) {
-        remoteAudioRef.current.srcObject = stream;
-        remoteAudioRef.current.play().catch((err) => console.log("Remote audio play error:", err));
+      let stream = event.streams && event.streams[0];
+      if (!stream) {
+        if (!remoteStream.current) {
+          remoteStream.current = new MediaStream();
+        }
+        if (!remoteStream.current.getTracks().some((t) => t.id === event.track.id)) {
+          remoteStream.current.addTrack(event.track);
+        }
+        stream = remoteStream.current;
+      } else {
+        remoteStream.current = stream;
       }
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
+
+      // Play audio through dual pipeline (HTML Audio element + Web Audio API)
+      playRemoteAudio(stream);
+
+      // Trigger playback when track un-mutes and packets start flowing
+      event.track.onunmute = () => {
+        console.log("Remote track active/receiving packets:", event.track.kind);
+        playRemoteAudio(stream);
+      };
+
+      if (remoteVideoRef.current && event.track.kind === "video") {
+        if (remoteVideoRef.current.srcObject !== stream) {
+          remoteVideoRef.current.srcObject = stream;
+        }
         remoteVideoRef.current.play().catch((err) => console.log("Remote video play error:", err));
+      }
+    };
+
+    peer.oniceconnectionstatechange = () => {
+      console.log("ICE Connection State:", peer.iceConnectionState);
+      if (peer.iceConnectionState === "connected" || peer.iceConnectionState === "completed") {
+        if (remoteStream.current) {
+          playRemoteAudio(remoteStream.current);
+        }
       }
     };
 
     peer.onconnectionstatechange = () => {
       console.log("WebRTC Connection State:", peer.connectionState);
-      if (peer.connectionState === "disconnected" || peer.connectionState === "failed") {
+      if (peer.connectionState === "failed") {
         cleanupCall();
       }
     };
@@ -621,14 +735,29 @@ export default function App() {
 
   const startLocalMedia = async (withVideo) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-        video: withVideo ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" } : false,
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: withVideo ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" } : false,
+        });
+      } catch (advancedErr) {
+        console.warn("Advanced getUserMedia constraints failed, falling back to basic audio/video:", advancedErr);
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: true,
+          video: withVideo ? true : false,
+        });
+      }
+
+      // Explicitly enable all audio tracks
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = true;
       });
+
       localStream.current = stream;
       if (localVideoRef.current && withVideo) {
         localVideoRef.current.srcObject = stream;
@@ -647,6 +776,10 @@ export default function App() {
       alert("Calls are available for 1-to-1 chats.");
       return;
     }
+
+    // Pre-unlock audio element inside user click gesture
+    unlockAudioOutput();
+
     const withVideo = type === "video";
     setCallType(type);
     setCallerInfo({
@@ -675,6 +808,9 @@ export default function App() {
   // Accept Incoming Call
   const handleAcceptCall = async () => {
     stopRingtone();
+    // Pre-unlock audio element inside user click gesture
+    unlockAudioOutput();
+
     setCallState("connected");
     startCallTimer();
 
@@ -723,9 +859,15 @@ export default function App() {
 
     if (!peer) {
       peer = initPeerConnection(sender_id);
-      if (localStream.current) {
-        localStream.current.getTracks().forEach((track) => peer.addTrack(track, localStream.current));
-      }
+    }
+
+    if (localStream.current) {
+      const senders = peer.getSenders();
+      localStream.current.getTracks().forEach((track) => {
+        if (!senders.some((s) => s.track === track)) {
+          peer.addTrack(track, localStream.current);
+        }
+      });
     }
 
     try {
@@ -738,7 +880,10 @@ export default function App() {
           try { await peer.addIceCandidate(cand); } catch (e) { }
         }
 
-        const answer = await peer.createAnswer();
+        const answer = await peer.createAnswer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: callTypeRef.current === "video",
+        });
         await peer.setLocalDescription(answer);
 
         sendWsSignal({
@@ -788,6 +933,14 @@ export default function App() {
   const cleanupCall = () => {
     stopRingtone();
     if (callTimerRef.current) clearInterval(callTimerRef.current);
+    if (audioSourceNodeRef.current) {
+      try { audioSourceNodeRef.current.disconnect(); } catch (e) {}
+      audioSourceNodeRef.current = null;
+    }
+    if (audioContextRef.current && audioContextRef.current.state !== "closed") {
+      try { audioContextRef.current.close(); } catch (e) {}
+      audioContextRef.current = null;
+    }
     if (localStream.current) {
       localStream.current.getTracks().forEach((t) => t.stop());
       localStream.current = null;
@@ -811,6 +964,7 @@ export default function App() {
     setCallDuration(0);
     setIsMuted(false);
     setIsVideoDisabled(false);
+    setIsAudioBlocked(false);
   };
 
   const startCallTimer = () => {
@@ -1380,7 +1534,7 @@ export default function App() {
         autoPlay
         playsInline
         controls={false}
-        style={{ position: "fixed", bottom: -100, opacity: 0, pointerEvents: "none" }}
+        style={{ position: "fixed", top: 0, left: 0, width: "1px", height: "1px", opacity: 0.01, pointerEvents: "none", zIndex: -1 }}
       />
 
       {/* ---------------- SIDEBAR ---------------- */}
@@ -2123,6 +2277,30 @@ export default function App() {
                     ? "Calling..."
                     : `In Call • ${formatDuration(callDuration)}`}
                 </div>
+                {isAudioBlocked && (
+                  <button
+                    type="button"
+                    onClick={unlockAudioOutput}
+                    style={{
+                      marginTop: 14,
+                      background: "#f59e0b",
+                      color: "#000",
+                      fontWeight: 700,
+                      fontSize: 13,
+                      padding: "8px 18px",
+                      borderRadius: 24,
+                      border: "none",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      boxShadow: "0 4px 15px rgba(245, 158, 11, 0.4)",
+                    }}
+                  >
+                    <Volume2 size={18} color="#000" />
+                    <span>Tap to Unmute Voice</span>
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -2151,6 +2329,18 @@ export default function App() {
               title={isMuted ? "Unmute Mic" : "Mute Mic"}
             >
               {isMuted ? <MicOff size={22} /> : <Mic size={22} />}
+            </button>
+
+            {/* Audio Output / Speaker Enforcer */}
+            <button
+              onClick={unlockAudioOutput}
+              style={{
+                ...styles.callControlCircle,
+                background: isAudioBlocked ? "#f59e0b" : "rgba(255,255,255,0.15)",
+              }}
+              title="Ensure Voice / Speaker Output"
+            >
+              <Volume2 size={22} color={isAudioBlocked ? "#000" : "#38bdf8"} />
             </button>
 
             {callType === "video" && (
