@@ -24,3 +24,4 @@ chat-backend/uploads/*
 .vscode/
 .idea/
 .DS_Store
+DEPLOYMENT_GUIDE.md
