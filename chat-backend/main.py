@@ -43,6 +43,7 @@ app = FastAPI(title="Realtime Chat API with Audio/Video Call & File Sharing")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_origin_regex=r"^https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

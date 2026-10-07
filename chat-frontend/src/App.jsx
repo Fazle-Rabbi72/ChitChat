@@ -965,7 +965,16 @@ export default function App() {
         setProfileImagePreview("");
       }
     } catch (err) {
-      setAuthError(err.response?.data?.detail || "Authentication failed!");
+      console.error("Auth error details:", err);
+      if (err.response?.data?.detail) {
+        setAuthError(err.response.data.detail);
+      } else if (!err.response || err.message === "Network Error") {
+        setAuthError(
+          "Network Error: Cannot connect to backend server! Please verify your live API URL."
+        );
+      } else {
+        setAuthError(err.message || "Authentication failed!");
+      }
     } finally {
       setIsSubmitting(false);
     }
