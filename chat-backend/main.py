@@ -484,6 +484,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...), db: 
                     "caller_name": user.username,
                     "caller_avatar": user.profile_image
                 }
+                target_conns = manager.active_connections.get(target_id, set())
+                if not target_conns or len(target_conns) == 0:
+                    await websocket.send_text(json.dumps({
+                        "type": "call-rejected",
+                        "reason": "User is offline or unreachable"
+                    }))
+                    continue
                 await manager.send_to_user(target_id, payload)
                 continue
 

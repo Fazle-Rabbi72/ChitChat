@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import API, { getApiBaseUrl, getWsBaseUrl } from "./api";
+import API from "./api";
 import {
   Phone,
   PhoneOff,
@@ -52,7 +52,7 @@ const getFileUrl = (url) => {
   ) {
     return url;
   }
-  const baseUrl = getApiBaseUrl();
+  const baseUrl = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
   return `${baseUrl}${url.startsWith("/") ? "" : "/"}${url}`;
 };
 
@@ -70,28 +70,6 @@ export default function App() {
   const [authError, setAuthError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(false);
-
-  // Dynamic Backend Server URL config
-  const [showServerConfig, setShowServerConfig] = useState(false);
-  const [currentServerUrl, setCurrentServerUrl] = useState(getApiBaseUrl());
-  const [customServerInput, setCustomServerInput] = useState(getApiBaseUrl());
-
-  const handleSaveServerUrl = () => {
-    if (!customServerInput.trim()) {
-      localStorage.removeItem("custom_api_url");
-    } else {
-      let cleanUrl = customServerInput.trim().replace(/\/$/, "");
-      if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
-        cleanUrl = "https://" + cleanUrl;
-      }
-      localStorage.setItem("custom_api_url", cleanUrl);
-    }
-    const updated = getApiBaseUrl();
-    setCurrentServerUrl(updated);
-    setCustomServerInput(updated);
-    setShowServerConfig(false);
-    setAuthError("");
-  };
 
   // App Data states & Loading states (for Skeletons)
   const [friends, setFriends] = useState([]);
@@ -156,10 +134,21 @@ export default function App() {
   const callTimerRef = useRef(null);
   const ringtoneStopRef = useRef(null);
   const activeChatRef = useRef(activeChat);
+  const callTypeRef = useRef(callType);
+  const callerInfoRef = useRef(callerInfo);
+  const reconnectTimeoutRef = useRef(null);
 
   useEffect(() => {
     activeChatRef.current = activeChat;
   }, [activeChat]);
+
+  useEffect(() => {
+    callTypeRef.current = callType;
+  }, [callType]);
+
+  useEffect(() => {
+    callerInfoRef.current = callerInfo;
+  }, [callerInfo]);
 
   // Handle window resize & orientation change
   useEffect(() => {
@@ -202,23 +191,39 @@ export default function App() {
       });
   }, [token]);
 
-  // WebSocket Setup
+  // WebSocket Setup with Auto-Reconnect and Visibility/Foreground Detection
   useEffect(() => {
     if (!token) return;
 
-    const wsUrl = `${getWsBaseUrl()}?token=${token}`;
-    try {
-      ws.current = new WebSocket(wsUrl);
-    } catch (err) {
-      console.warn("WebSocket initialization deferred:", err);
-      return;
-    }
+    const connectWebSocket = () => {
+      if (!token) return;
+      if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
 
-    ws.current.onerror = (e) => {
-      console.warn("WebSocket status: waiting for server connection", e);
-    };
+      try {
+        const wsUrl = `${getWsBaseUrl()}?token=${token}`;
+        const socket = new WebSocket(wsUrl);
+        ws.current = socket;
 
-    ws.current.onmessage = async (event) => {
+        socket.onopen = () => {
+          console.log("WebSocket connected successfully!");
+        };
+
+        socket.onerror = (e) => {
+          console.warn("WebSocket status: waiting for server connection", e);
+        };
+
+        socket.onclose = () => {
+          console.warn("WebSocket disconnected. Auto-reconnecting in 2s...");
+          ws.current = null;
+          if (token) {
+            clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = setTimeout(connectWebSocket, 2000);
+          }
+        };
+
+        socket.onmessage = async (event) => {
       try {
         const data = JSON.parse(event.data);
 
@@ -248,7 +253,7 @@ export default function App() {
           setMessages((prev) =>
             prev.map((m) =>
               (m.target_id === data.delivered_to_user_id || m.target_id === data.chat_id) &&
-              m.status === "sent"
+                m.status === "sent"
                 ? { ...m, status: "delivered" }
                 : m
             )
@@ -261,7 +266,7 @@ export default function App() {
           setMessages((prev) =>
             prev.map((m) =>
               (m.target_id === data.seen_by_user_id || m.target_id === data.chat_id) &&
-              m.status !== "seen"
+                m.status !== "seen"
                 ? { ...m, status: "seen" }
                 : m
             )
@@ -278,14 +283,14 @@ export default function App() {
               prev.map((m) =>
                 m.id === data.message_id
                   ? {
-                      ...m,
-                      is_deleted_everyone: true,
-                      msg_type: "deleted",
-                      content: "This message was deleted",
-                      file_url: null,
-                      file_name: null,
-                      file_size: null,
-                    }
+                    ...m,
+                    is_deleted_everyone: true,
+                    msg_type: "deleted",
+                    content: "This message was deleted",
+                    file_url: null,
+                    file_name: null,
+                    file_size: null,
+                  }
                   : m
               )
             );
@@ -317,7 +322,7 @@ export default function App() {
             try {
               const offer = await pc.current.createOffer({
                 offerToReceiveAudio: true,
-                offerToReceiveVideo: callType === "video",
+                offerToReceiveVideo: callTypeRef.current === "video",
               });
               await pc.current.setLocalDescription(offer);
               sendWsSignal({
@@ -335,7 +340,7 @@ export default function App() {
         // WebRTC Signaling: Call Rejected
         if (data.type === "call-rejected") {
           stopRingtone();
-          alert(`${callerInfo?.name || "User"} declined the call.`);
+          alert(data.reason || `${callerInfoRef.current?.name || "User"} declined the call.`);
           cleanupCall();
           return;
         }
@@ -385,15 +390,44 @@ export default function App() {
 
         // Fallback
         setMessages((prev) => [...prev, data]);
+          } catch (err) {
+            console.error("WS Parse error:", err);
+          }
+        };
       } catch (err) {
-        console.error("WS Parse error:", err);
+        console.warn("WebSocket initialization deferred:", err);
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = setTimeout(connectWebSocket, 3000);
       }
     };
 
-    return () => {
-      if (ws.current) ws.current.close();
+    connectWebSocket();
+
+    // Reconnect instantly when user returns to mobile browser tab or network reconnects
+    const handleReengagement = () => {
+      if (document.visibilityState === "visible") {
+        if (!ws.current || ws.current.readyState === WebSocket.CLOSED || ws.current.readyState === WebSocket.CLOSING) {
+          console.log("Tab foregrounded / focused: Reconnecting WebSocket...");
+          connectWebSocket();
+        }
+      }
     };
-  }, [token, callType, callerInfo]);
+
+    document.addEventListener("visibilitychange", handleReengagement);
+    window.addEventListener("focus", handleReengagement);
+    window.addEventListener("online", handleReengagement);
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleReengagement);
+      window.removeEventListener("focus", handleReengagement);
+      window.removeEventListener("online", handleReengagement);
+      clearTimeout(reconnectTimeoutRef.current);
+      if (ws.current) {
+        ws.current.close();
+        ws.current = null;
+      }
+    };
+  }, [token]);
 
   // Attach remote stream to audio/video elements when call connects
   useEffect(() => {
@@ -478,13 +512,21 @@ export default function App() {
   const sendWsSignal = (payload) => {
     if (ws.current && ws.current.readyState === WebSocket.OPEN) {
       ws.current.send(JSON.stringify(payload));
+      return true;
+    } else {
+      console.warn("WebSocket not open. ReadyState:", ws.current?.readyState);
+      if (payload.type === "call-request") {
+        alert("Connecting to chat server... Please wait a moment and try calling again.");
+        cleanupCall();
+      }
+      return false;
     }
   };
 
   // ---------------- WebRTC Calling Functions ----------------
   const initPeerConnection = (targetUserId) => {
     if (pc.current) {
-      try { pc.current.close(); } catch (e) {}
+      try { pc.current.close(); } catch (e) { }
     }
 
     const peer = new RTCPeerConnection(RTC_CONFIG);
@@ -643,7 +685,7 @@ export default function App() {
         // Drain queued ICE candidates
         while (iceCandidatesQueue.current.length > 0) {
           const cand = iceCandidatesQueue.current.shift();
-          try { await peer.addIceCandidate(cand); } catch (e) {}
+          try { await peer.addIceCandidate(cand); } catch (e) { }
         }
 
         const answer = await peer.createAnswer();
@@ -660,7 +702,7 @@ export default function App() {
         // Drain queued ICE candidates
         while (iceCandidatesQueue.current.length > 0) {
           const cand = iceCandidatesQueue.current.shift();
-          try { await peer.addIceCandidate(cand); } catch (e) {}
+          try { await peer.addIceCandidate(cand); } catch (e) { }
         }
       } else if (signal.type === "candidate" && signal.candidate) {
         const candidate = new RTCIceCandidate(signal.candidate);
@@ -705,7 +747,7 @@ export default function App() {
       remoteStream.current = null;
     }
     if (pc.current) {
-      try { pc.current.close(); } catch (e) {}
+      try { pc.current.close(); } catch (e) { }
       pc.current = null;
     }
     if (remoteAudioRef.current) {
@@ -751,10 +793,10 @@ export default function App() {
         try {
           osc.stop();
           audioCtx.close();
-        } catch (e) {}
+        } catch (e) { }
       };
     } catch (e) {
-      ringtoneStopRef.current = () => {};
+      ringtoneStopRef.current = () => { };
     }
   };
 
@@ -930,14 +972,14 @@ export default function App() {
           prev.map((m) =>
             m.id === messageId
               ? {
-                  ...m,
-                  is_deleted_everyone: true,
-                  msg_type: "deleted",
-                  content: "This message was deleted",
-                  file_url: null,
-                  file_name: null,
-                  file_size: null,
-                }
+                ...m,
+                is_deleted_everyone: true,
+                msg_type: "deleted",
+                content: "This message was deleted",
+                file_url: null,
+                file_name: null,
+                file_size: null,
+              }
               : m
           )
         );
@@ -1204,70 +1246,6 @@ export default function App() {
               )}
             </button>
           </form>
-
-          {/* Backend Server Connection Info & Configuration */}
-          <div style={{ marginTop: 18, paddingTop: 14, borderTop: "1px solid rgba(255,255,255,0.08)", textAlign: "center" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-              <span style={{ fontSize: 12, color: "#94a3b8" }}>
-                Server: <strong style={{ color: currentServerUrl.includes("localhost") ? "#f59e0b" : "#10b981" }}>{currentServerUrl}</strong>
-              </span>
-              <button
-                type="button"
-                onClick={() => setShowServerConfig(!showServerConfig)}
-                style={{
-                  background: "rgba(255,255,255,0.08)",
-                  border: "none",
-                  borderRadius: 6,
-                  padding: "3px 8px",
-                  color: "#38bdf8",
-                  fontSize: 11,
-                  cursor: "pointer",
-                  fontWeight: 600,
-                }}
-              >
-                {showServerConfig ? "Close" : "Change URL"}
-              </button>
-            </div>
-
-            {showServerConfig && (
-              <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8, textAlign: "left" }}>
-                <p style={{ fontSize: 11, color: "#94a3b8", margin: 0 }}>
-                  Enter your live backend URL (e.g. from Render.com):
-                </p>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <input
-                    type="text"
-                    value={customServerInput}
-                    onChange={(e) => setCustomServerInput(e.target.value)}
-                    placeholder="https://your-backend.onrender.com"
-                    style={{
-                      ...styles.textInput,
-                      padding: "8px 10px",
-                      fontSize: 12,
-                      flex: 1,
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={handleSaveServerUrl}
-                    style={{
-                      background: "#6366f1",
-                      color: "#fff",
-                      border: "none",
-                      borderRadius: 8,
-                      padding: "8px 14px",
-                      fontSize: 12,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    Save
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
         </div>
       </div>
     );
@@ -1297,8 +1275,8 @@ export default function App() {
           isMobile && activeChat
             ? "app-sidebar app-sidebar-mobile-hidden"
             : isMobile
-            ? "app-sidebar app-sidebar-mobile-full"
-            : "app-sidebar"
+              ? "app-sidebar app-sidebar-mobile-full"
+              : "app-sidebar"
         }
         style={{
           ...styles.sidebar,
@@ -1570,8 +1548,8 @@ export default function App() {
           isMobile && !activeChat
             ? "app-chat-window app-chat-mobile-hidden"
             : isMobile
-            ? "app-chat-window app-chat-mobile-full"
-            : "app-chat-window"
+              ? "app-chat-window app-chat-mobile-full"
+              : "app-chat-window"
         }
         style={{
           ...styles.chatWindow,
@@ -1784,9 +1762,9 @@ export default function App() {
                           <span style={styles.msgTimestamp}>
                             {msg.timestamp
                               ? new Date(msg.timestamp).toLocaleTimeString([], {
-                                  hour: "2-digit",
-                                  minute: "2-digit",
-                                })
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })
                               : ""}
                           </span>
 
