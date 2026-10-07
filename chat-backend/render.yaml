@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: chatapp-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        value: postgresql://neondb_owner:npg_9DEAuOVIvwx4@ep-cold-lab-b4f5z4j3-pooler.c-6.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require
+      - key: SECRET_KEY
+        generateValue: true
+      - key: IMGBB_API_KEY
+        value: 6f2066a27370f245f424cffff0bffd64

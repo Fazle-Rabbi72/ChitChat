@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+venv/
+.venv/
+
+# Environment files
+.env
+.env.local
+
+# Build outputs
+dist/
+dist-ssr/
+build/
+
+# Cache & logs
+__pycache__/
+*.pyc
+*.log
+chat-backend/chat.db
+chat-backend/uploads/*
+!chat-backend/uploads/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
