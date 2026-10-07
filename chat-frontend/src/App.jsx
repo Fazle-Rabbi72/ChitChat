@@ -69,7 +69,7 @@ export default function App() {
   const [profileImagePreview, setProfileImagePreview] = useState("");
   const [authError, setAuthError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [checkingAuth, setCheckingAuth] = useState(true);
+  const [checkingAuth, setCheckingAuth] = useState(false);
 
   // App Data states & Loading states (for Skeletons)
   const [friends, setFriends] = useState([]);
@@ -165,21 +165,19 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [lightboxImage, deleteModalMsg, showGroupModal, showEmojiPicker, activeChat, callState]);
 
-  // Verify Auth on Initial Load (Protected Route check)
+  // Background Session Verification (Non-blocking instant load)
   useEffect(() => {
-    if (!token) {
-      setCheckingAuth(false);
-      return;
-    }
+    if (!token) return;
     API.get(`/api/me?token=${token}`)
       .then((res) => {
         setCurrentUser(res.data);
         localStorage.setItem("user", JSON.stringify(res.data));
       })
-      .catch(() => {
-        handleLogout();
-      })
-      .finally(() => setCheckingAuth(false));
+      .catch((err) => {
+        if (err?.response?.status === 401 || err?.response?.status === 403) {
+          handleLogout();
+        }
+      });
   }, [token]);
 
   // WebSocket Setup
@@ -187,7 +185,16 @@ export default function App() {
     if (!token) return;
 
     const wsUrl = `${import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws"}?token=${token}`;
-    ws.current = new WebSocket(wsUrl);
+    try {
+      ws.current = new WebSocket(wsUrl);
+    } catch (err) {
+      console.warn("WebSocket initialization deferred:", err);
+      return;
+    }
+
+    ws.current.onerror = (e) => {
+      console.warn("WebSocket status: waiting for server connection", e);
+    };
 
     ws.current.onmessage = async (event) => {
       try {
@@ -380,24 +387,24 @@ export default function App() {
     }
   }, [callState, callType]);
 
-  // Load Contacts, Groups & Presence
+  // Load Contacts, Groups & Presence (Resilient Promise.allSettled)
   const loadInitialData = async () => {
     if (!token) return;
     try {
-      const [friendsRes, groupsRes, pendingRes, onlineRes] = await Promise.all([
+      const [friendsRes, groupsRes, pendingRes, onlineRes] = await Promise.allSettled([
         API.get(`/api/friends?token=${token}`),
         API.get(`/api/groups?token=${token}`),
         API.get(`/api/friend-requests/pending?token=${token}`),
-        API.get(`/api/users/online`).catch(() => ({ data: { online_user_ids: [] } })),
+        API.get(`/api/users/online`),
       ]);
-      setFriends(friendsRes.data);
-      setGroups(groupsRes.data);
-      setPendingRequests(pendingRes.data);
-      if (onlineRes?.data?.online_user_ids) {
-        setOnlineUserIds(new Set(onlineRes.data.online_user_ids));
+      if (friendsRes.status === "fulfilled") setFriends(friendsRes.value.data || []);
+      if (groupsRes.status === "fulfilled") setGroups(groupsRes.value.data || []);
+      if (pendingRes.status === "fulfilled") setPendingRequests(pendingRes.value.data || []);
+      if (onlineRes.status === "fulfilled" && onlineRes.value?.data?.online_user_ids) {
+        setOnlineUserIds(new Set(onlineRes.value.data.online_user_ids));
       }
     } catch (err) {
-      console.error("Failed to load initial data:", err);
+      console.warn("Initial data load deferred:", err);
     } finally {
       setLoadingContacts(false);
     }
@@ -1043,15 +1050,8 @@ export default function App() {
     g.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  // ---------------- UI RENDER ----------------
-  if (checkingAuth) {
-    return (
-      <div style={styles.authSplash}>
-        <div style={styles.spinner} />
-        <p style={{ marginTop: 16, color: "#94a3b8" }}>Loading AuraChat...</p>
-      </div>
-    );
-  }
+  // ---------------- UI RENDER (Instant 0ms Mount) ----------------
+
 
   // Protected Route: If not logged in, render Modern Glass Auth Screen
   if (!token) {
